@@ -1,29 +1,27 @@
-language: php
+sudo: false
+language: generic
 
 compiler:
   - gcc
-
-php:
-  - 7.3
-
-sudo: false
 
 addons:
   apt:
     packages:
       - valgrind
+  homebrew:
+    update: true
+    packages:
+      - php@7.3
+
 env:
   global:
     - REPORT_EXIT_STATUS=1
-  matrix:
     - TEST_PHP_ARGS="-q --show-diff"
-    - TEST_PHP_ARGS="-q -m --show-mem"
 
 matrix:
   fast_finish: true
-  allow_failures:
-    - php: 7.3
-      env: TEST_PHP_ARGS="-q -m --show-mem"
+  include:
+    - os: osx
 
 before_install:
   - pip install --user cpp-coveralls
@@ -31,11 +29,11 @@ before_install:
 script:
   - phpize
   - wget -q -O run-tests.php https://raw.githubusercontent.com/php/php-src/master/run-tests.php
-  - ./configure --with-valgrind
+  - ./configure
   - make test-coverage
 
 after_success:
   - coveralls -b $TRAVIS_BUILD_DIR -E Zend --gcov-options '\-lp'
 
 notifications:
-  email: false
+email: false
