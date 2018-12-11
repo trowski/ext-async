@@ -31,11 +31,11 @@ if test "$PHP_ASYNC" != "no"; then
   fi
 
   ASYNC_CFLAGS="-Wall -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1"
-  LDFLAGS="$LDFLAGS -lpthread"
+  ASYNC_SHARED_LIBADD="-lpthread"
   
   case $host in
     *linux*)
-      LDFLAGS="$LDFLAGS -z now"
+      ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -z now"
   esac
   
   if test "$PHP_VALGRIND" != "no"; then
@@ -149,15 +149,7 @@ if test "$PHP_ASYNC" != "no"; then
   
   PHP_ADD_INCLUDE("$srcdir/thirdparty/libuv/include")
   
-  if test "$TRAVIS" = ""; then
-    ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -L${srcdir}/thirdparty/lib -luv"
-  else
-    dnl Stupid workaround for travis build, for some reason the linker refuses to use a subdirectory of the project?!
-    
-    TMP=$(mktemp -d)
-    cp ${srcdir}/thirdparty/lib/libuv.a ${TMP}/libuv.a
-    ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -L${TMP} -luv"
-  fi
+  ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -Wl,-Bstatic,-L${srcdir}/thirdparty/lib,-luv,-Bdynamic"
   
   if test "$PHP_OPENSSL" = ""; then
     AC_CHECK_HEADER(openssl/evp.h, [
