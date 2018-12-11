@@ -10,11 +10,26 @@ PHP_ARG_WITH(valgrind, Whether to enable "valgrind" support,
 if test "$PHP_ASYNC" != "no"; then
   AC_DEFINE(HAVE_ASYNC, 1, [ ])
   
+  AS_CASE([$host_cpu],
+    [x86_64*], [async_cpu="x86_64"],
+    [x86*], [async_cpu="x86"],
+    [arm*], [async_cpu="arm"],
+    [arm64*], [async_cpu="arm64"],
+    [async_cpu="unknown"]
+  )
+  
+  AS_CASE([$host_os],
+    [darwin*], [async_os="MAC"],
+    [cygwin*], [async_os="WIN"],
+    [mingw*], [async_os="WIN"],
+    [async_os="LINUX"]
+  )
+  
   DIR="${srcdir}/thirdparty"
 
   AC_MSG_CHECKING(for static libuv)
 
-  if test ! -s "${DIR}/lib/libuv.a"; then
+  if test "$async_os" = 'LINUX' && test ! -s "${DIR}/lib/libuv.a"; then
     AC_MSG_RESULT(no)
     
     TMP=$(mktemp -d)
@@ -94,21 +109,6 @@ if test "$PHP_ASYNC" != "no"; then
     src/xp/udp.c
   "
   
-  AS_CASE([$host_cpu],
-    [x86_64*], [async_cpu="x86_64"],
-    [x86*], [async_cpu="x86"],
-    [arm*], [async_cpu="arm"],
-    [arm64*], [async_cpu="arm64"],
-    [async_cpu="unknown"]
-  )
-  
-  AS_CASE([$host_os],
-    [darwin*], [async_os="MAC"],
-    [cygwin*], [async_os="WIN"],
-    [mingw*], [async_os="WIN"],
-    [async_os="LINUX"]
-  )
-  
   if test "$async_cpu" = 'x86_64'; then
     if test "$async_os" = 'LINUX'; then
       async_asm_file="x86_64_sysv_elf_gas.S"
@@ -149,7 +149,11 @@ if test "$PHP_ASYNC" != "no"; then
   
   PHP_ADD_INCLUDE("$srcdir/thirdparty/libuv/include")
   
-  ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -L${srcdir}/thirdparty/lib -luv"
+  if test "$async_os" = 'MAC'; then
+    ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -luv"
+  else
+    ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -L${srcdir}/thirdparty/lib -luv"
+  fi
   
   if test "$PHP_OPENSSL" = ""; then
     AC_CHECK_HEADER(openssl/evp.h, [

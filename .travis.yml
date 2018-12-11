@@ -11,6 +11,7 @@ addons:
   homebrew:
     update: true
     packages:
+      - libuv
       - php@7.3
 
 env:
