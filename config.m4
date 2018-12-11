@@ -21,7 +21,7 @@ if test "$PHP_ASYNC" != "no"; then
     cp -r ${DIR}/libuv $TMP
     pushd ${TMP}/libuv
     ./autogen.sh
-    ./configure --prefix=${TMP}/build CFLAGS="$(CFLAGS) -fPIC -DPIC -g -O2"
+    ./configure --disable-shared --prefix=${TMP}/build CFLAGS="$(CFLAGS) -fPIC -DPIC -g -O2"
     make install
     popd
     mv ${TMP}/build/lib/libuv.a ${DIR}/lib
@@ -31,11 +31,11 @@ if test "$PHP_ASYNC" != "no"; then
   fi
 
   ASYNC_CFLAGS="-Wall -DZEND_ENABLE_STATIC_TSRMLS_CACHE=1"
-  ASYNC_SHARED_LIBADD="-lpthread"
+  LDFLAGS="$LDFLAGS -lpthread"
   
   case $host in
     *linux*)
-      ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -z now"
+      LDFLAGS="$LDFLAGS -z now"
   esac
   
   if test "$PHP_VALGRIND" != "no"; then
@@ -149,7 +149,7 @@ if test "$PHP_ASYNC" != "no"; then
   
   PHP_ADD_INCLUDE("$srcdir/thirdparty/libuv/include")
   
-  ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -Wl,-Bstatic,-L${srcdir}/thirdparty/lib,-luv,-Bdynamic"
+  ASYNC_SHARED_LIBADD="$ASYNC_SHARED_LIBADD -L${srcdir}/thirdparty/lib -luv"
   
   if test "$PHP_OPENSSL" = ""; then
     AC_CHECK_HEADER(openssl/evp.h, [
