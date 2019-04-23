@@ -184,6 +184,7 @@ ASYNC_API extern zend_class_entry *async_task_ce;
 ASYNC_API extern zend_class_entry *async_task_scheduler_ce;
 ASYNC_API extern zend_class_entry *async_tcp_server_ce;
 ASYNC_API extern zend_class_entry *async_tcp_socket_ce;
+ASYNC_API extern zend_class_entry *async_thread_pool_ce;
 ASYNC_API extern zend_class_entry *async_tls_client_encryption_ce;
 ASYNC_API extern zend_class_entry *async_tls_info_ce;
 ASYNC_API extern zend_class_entry *async_tls_server_encryption_ce;
@@ -210,6 +211,7 @@ void async_stream_ce_register();
 void async_stream_watcher_ce_register();
 void async_task_ce_register();
 void async_tcp_ce_register();
+void async_thread_ce_register();
 void async_timer_ce_register();
 void async_udp_socket_ce_register();
 
