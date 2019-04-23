@@ -56,6 +56,8 @@ typedef struct {
 
 typedef struct {
 	uint16_t flags;
+	
+	zend_string *bootstrap;
 
 	uv_mutex_t mutex;
 	uv_cond_t cond;
@@ -64,9 +66,6 @@ typedef struct {
 		async_thread_job *first;
 		async_thread_job *last;
 	} jobs;
-	
-	async_thread_job *first;
-	async_thread_job *last;
 } async_thread_data;
 
 typedef struct _async_thread async_thread;
@@ -74,6 +73,9 @@ typedef struct _async_thread async_thread;
 struct _async_thread {
 	uv_thread_t handle;
 	async_thread_data *data;
+	
+	int id;
+	
 	async_thread *prev;
 	async_thread *next;
 };
@@ -81,14 +83,64 @@ struct _async_thread {
 typedef struct {
 	zend_object std;
 	
-	uv_thread_t worker;
+	int size;
+	
 	async_thread_data *data;
+	
+	struct {
+		async_thread *first;
+		async_thread *last;
+	} workers;
 } async_thread_pool;
 
 
-static void run_job(async_thread_data *data, async_thread_job *job, zend_execute_data *frame)
+static int run_bootstrap(async_thread *worker)
+{
+	zend_file_handle handle;
+	zend_op_array *ops;
+	
+	zval retval;
+	
+	ASYNC_DEBUG_LOG("Bootstrap worker #%d\n", worker->id);
+	
+	if (SUCCESS != php_stream_open_for_zend_ex(ZSTR_VAL(worker->data->bootstrap), &handle, USE_PATH | REPORT_ERRORS | STREAM_OPEN_FOR_INCLUDE)) {
+		return FAILURE;
+	}
+	
+	if (!handle.opened_path) {
+		handle.opened_path = zend_string_dup(worker->data->bootstrap, 0);
+	}
+	
+	zend_hash_add_empty_element(&EG(included_files), handle.opened_path);
+	
+	ops = zend_compile_file(&handle, ZEND_REQUIRE);
+	zend_destroy_file_handle(&handle);
+	
+	if (ops) {
+		ZVAL_UNDEF(&retval);
+		zend_execute(ops, &retval);
+		destroy_op_array(ops);
+		efree(ops);
+		
+		if (!EG(exception)) {
+			zval_ptr_dtor(&retval);
+			
+			return SUCCESS;
+		}
+	}
+	
+	if (EG(exception)) {
+		zend_clear_exception();
+	}
+	
+	return FAILURE;
+}
+
+static void run_job(async_thread *worker, async_thread_job *job, zend_execute_data *frame)
 {
 	zval retval;
+	
+	ASYNC_DEBUG_LOG("Execute job using worker #%d\n", worker->id);
 	
 	ZVAL_UNDEF(&retval);
 	
@@ -125,6 +177,7 @@ static void run_job(async_thread_data *data, async_thread_job *job, zend_execute
 
 ASYNC_CALLBACK run_thread(void *arg)
 {
+	async_thread *worker;
 	async_thread_data *data;
 	async_thread_job *job;
 	
@@ -132,7 +185,8 @@ ASYNC_CALLBACK run_thread(void *arg)
 	
 	int argc;
 	
-	data = (async_thread_data *) arg;
+	worker = (async_thread *) arg;
+	data = worker->data;
 	
 	ts_resource(0);
 
@@ -148,10 +202,14 @@ ASYNC_CALLBACK run_thread(void *arg)
 	SG(headers_sent) = 1;
 	SG(request_info).no_headers = 1;
 	
+	if (data->bootstrap != NULL && FAILURE == run_bootstrap(worker)) {
+		goto cleanup;
+	}
+	
 	do {
 		uv_mutex_lock(&data->mutex);
 		
-		while (data->first == NULL) {
+		while (data->jobs.first == NULL) {
 			if (data->flags & ASYNC_THREAD_POOL_FLAG_CLOSED) {
 				uv_mutex_unlock(&data->mutex);
 				
@@ -161,17 +219,19 @@ ASYNC_CALLBACK run_thread(void *arg)
 			uv_cond_wait(&data->cond, &data->mutex);
 		}
 		
-		ASYNC_LIST_EXTRACT_FIRST(data, job);
+		ASYNC_LIST_EXTRACT_FIRST(&data->jobs, job);
 		
 		uv_mutex_unlock(&data->mutex);
 		
 		argc = ZEND_CALL_NUM_ARGS(job->exec);
 		frame = zend_vm_stack_push_call_frame(ZEND_CALL_TOP_FUNCTION, php_parallel_copy(job->exec->func, 0), argc, NULL, NULL);
 		
-		run_job(data, job, frame);
+		run_job(worker, job, frame);
 	} while (1);
 	
 cleanup:
+
+	ASYNC_DEBUG_LOG("Dispose of worker #%d\n", worker->id);
 
 	php_request_shutdown(NULL);
 
@@ -187,36 +247,89 @@ static zend_object *async_thread_pool_object_create(zend_class_entry *ce)
 	zend_object_std_init(&pool->std, ce);
 	pool->std.handlers = &async_thread_pool_handlers;
 	
-	pool->data = pecalloc(1, sizeof(async_thread_data), 1);
-	
-	uv_mutex_init_recursive(&pool->data->mutex);
-	uv_cond_init(&pool->data->cond);
-	
-	uv_thread_create(&pool->worker, run_thread, pool->data);
-	
 	return &pool->std;
 }
 
 static void async_thread_pool_object_destroy(zend_object *object)
 {
 	async_thread_pool *pool;
+	async_thread *worker;
 	
 	pool = (async_thread_pool *) object;
 	
-	ASYNC_DEBUG_LOG("=> JOIN\n");
-	uv_thread_join(&pool->worker);
-	ASYNC_DEBUG_LOG("DONE!\n");
+	if (pool->data) {
+		uv_mutex_lock(&pool->data->mutex);
 	
-	uv_cond_destroy(&pool->data->cond);
-	uv_mutex_destroy(&pool->data->mutex);
-	
-	pefree(pool->data, 1);
+		pool->data->flags |= ASYNC_THREAD_POOL_FLAG_CLOSED;
+		
+		uv_cond_broadcast(&pool->data->cond);		
+		uv_mutex_unlock(&pool->data->mutex);
+		
+		while (pool->workers.first != NULL) {
+			ASYNC_LIST_EXTRACT_FIRST(&pool->workers, worker);
+			
+			uv_thread_join(&worker->handle);
+			
+			pefree(worker, 1);
+		}
+		
+		uv_cond_destroy(&pool->data->cond);
+		uv_mutex_destroy(&pool->data->mutex);
+		
+		if (pool->data->bootstrap != NULL) {
+			zend_string_release(pool->data->bootstrap);
+		}
+		
+		pefree(pool->data, 1);
+	}
 	
 	zend_object_std_dtor(&pool->std);
 }
 
 static ZEND_METHOD(ThreadPool, __construct)
 {
+	async_thread_pool *pool;
+	async_thread *worker;
+	
+	zend_long size;
+	zend_string *bootstrap;
+	
+	int i;
+	
+	size = 1;
+	bootstrap = NULL;
+	
+	ZEND_PARSE_PARAMETERS_START_EX(ZEND_PARSE_PARAMS_THROW, 0, 2)
+		Z_PARAM_OPTIONAL
+		Z_PARAM_LONG(size)
+		Z_PARAM_STR(bootstrap)
+	ZEND_PARSE_PARAMETERS_END();
+	
+	pool = (async_thread_pool *) Z_OBJ_P(getThis());
+	
+	ASYNC_CHECK_ERROR(size < 1, "Thread pool size must be at least 1");
+	ASYNC_CHECK_ERROR(size > 64, "maximum thread pool size is 64");
+	
+	pool->data = pecalloc(1, sizeof(async_thread_data), 1);
+	
+	uv_mutex_init_recursive(&pool->data->mutex);
+	uv_cond_init(&pool->data->cond);
+	
+	if (bootstrap != NULL) {
+		pool->data->bootstrap = zend_string_dup(bootstrap, 1);
+	}
+	
+	pool->size = (int) size;
+	
+	for (i = 1; i <= pool->size; i++) {
+		worker = pecalloc(1, sizeof(async_thread), 1);
+		worker->id = i; 
+		worker->data = pool->data;
+		
+		uv_thread_create(&worker->handle, run_thread, worker);
+		
+		ASYNC_LIST_APPEND(&pool->workers, worker);
+	}
 }
 
 static ZEND_METHOD(ThreadPool, close)
@@ -231,7 +344,7 @@ static ZEND_METHOD(ThreadPool, close)
 	
 	pool->data->flags |= ASYNC_THREAD_POOL_FLAG_CLOSED;
 	
-	uv_cond_signal(&pool->data->cond);
+	uv_cond_broadcast(&pool->data->cond);
 	uv_mutex_unlock(&pool->data->mutex);
 }
 
@@ -254,8 +367,6 @@ ASYNC_CALLBACK job_done_cb(uv_async_t *handle)
 	
 	awaitable = (async_thread_awaitable *) handle->data;
 	
-	ASYNC_DEBUG_LOG("=> JOB COMPLETED!\n");
-	
 	async_resolve_awaitable((async_deferred_awaitable *) awaitable, &awaitable->result);
 	
 	if (!(uv_is_closing((uv_handle_t *) handle))) {
@@ -270,8 +381,6 @@ ASYNC_CALLBACK job_dispose_cb(async_deferred_awaitable *obj)
 	awaitable = (async_thread_awaitable *) obj;
 	
 	awaitable->job->flags |= ASYNC_THREAD_POOL_JOB_FLAG_CANCELLED;
-	
-	ASYNC_DEBUG_LOG("=> JOB CANCELLED!\n");
 }
 
 static ZEND_METHOD(ThreadPool, submit)
@@ -317,7 +426,7 @@ static ZEND_METHOD(ThreadPool, submit)
 	
 	uv_mutex_lock(&pool->data->mutex);
 	
-	ASYNC_LIST_APPEND(pool->data, job);
+	ASYNC_LIST_APPEND(&pool->data->jobs, job);
 	
 	uv_cond_signal(&pool->data->cond);
 	uv_mutex_unlock(&pool->data->mutex);
